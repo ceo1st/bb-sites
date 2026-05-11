@@ -30,9 +30,13 @@ async function(args) {
   try { lsd = require('LSD').token; } catch(e) {}
   if (!lsd) try { lsd = require('LSDToken').token; } catch(e) {}
 
-  // If user_ids provided, create thread first to get ig_thread_igid
-  var threadIgid = args.thread_id;
-  if (!threadIgid && args.user_ids) {
+  // Resolve thread_v2_id (ig_thread_igid) needed by the send mutation.
+  // Input can be: user_ids (new thread), thread_v2_id, or thread_fbid (from URL).
+  // We always go through create_group_thread which returns thread_v2_id for any input.
+  var threadIgid = null;
+
+  if (args.user_ids) {
+    // New conversation by user IDs
     var uids = args.user_ids.split(',').map(function(id) { return id.trim(); });
     var createBody = new URLSearchParams();
     createBody.append('recipient_users', JSON.stringify(uids));
@@ -43,8 +47,35 @@ async function(args) {
     });
     if (!createResp.ok) return {error: 'Failed to create thread', hint: 'HTTP ' + createResp.status};
     var createData = await createResp.json();
-    // The REST API returns thread_v2_id which is the ig_thread_igid
     threadIgid = createData.thread_v2_id || createData.thread_id;
+  } else if (args.thread_id) {
+    // Input could be: thread_v2_id, or interop_fbid from URL (/direct/t/117711076288000/)
+    // Look up inbox to match by thread_v2_id or user's interop_messaging_user_fbid
+    var inboxResp = await fetch('/api/v1/direct_v2/inbox/?limit=20', {
+      credentials: 'include',
+      headers: {'X-CSRFToken': csrf, 'X-IG-App-ID': '936619743392459', 'X-Requested-With': 'XMLHttpRequest'}
+    });
+    if (inboxResp.ok) {
+      var inboxData = await inboxResp.json();
+      var threads = (inboxData.inbox && inboxData.inbox.threads) || [];
+      for (var i = 0; i < threads.length; i++) {
+        var t = threads[i];
+        if (String(t.thread_v2_id) === String(args.thread_id)) {
+          threadIgid = t.thread_v2_id;
+          break;
+        }
+        // Match by user's interop_messaging_user_fbid (used in DM URLs)
+        var users = t.users || [];
+        for (var j = 0; j < users.length; j++) {
+          if (String(users[j].interop_messaging_user_fbid) === String(args.thread_id)) {
+            threadIgid = t.thread_v2_id;
+            break;
+          }
+        }
+        if (threadIgid) break;
+      }
+    }
+    if (!threadIgid) threadIgid = args.thread_id;
   }
 
   if (!threadIgid) return {error: 'Could not determine thread ID'};
